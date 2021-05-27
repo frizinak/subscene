@@ -1,13 +1,11 @@
 package subscene
 
 import (
-	"archive/zip"
-	"bytes"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -15,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/frizinak/subscene/archive"
 )
 
 type Downloads []*Download
@@ -186,94 +185,76 @@ func (api *API) DownloadURI(d *Download, retries int) (*url.URL, error) {
 	return href(hr)
 }
 
-func (api *API) Download(u *url.URL, dir, name string, retries int) error {
+type ZipInfo struct {
+	URI       *url.URL
+	Filename  string
+	Extracted map[string]string
+	Err       error
+}
+
+func (api *API) Download(u *url.URL, dir, name string, retries int) ZipInfo {
+	var z ZipInfo
+	z.URI = u
+
 	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
-		return err
+		z.Err = err
+		return z
 	}
 
 	res, err := api.doReq(req)
 	if err != nil {
-		return err
+		z.Err = err
+		return z
 	}
 	defer res.Body.Close()
 
 	retry, err := shouldRetry(res, retries)
 	if err != nil {
-		return err
+		z.Err = err
+		return z
 	}
 	if retry {
 		return api.Download(u, dir, name, retries-1)
 	}
 
+	_, params, _ := mime.ParseMediaType(res.Header.Get("Content-Disposition"))
+	if v, ok := params["filename"]; ok {
+		z.Filename = v
+	}
+
 	size, err := strconv.ParseInt(res.Header.Get("Content-Length"), 10, 64)
 	if err != nil {
-		return err
+		z.Err = err
+		return z
 	}
 	if size > 1024*1024*80 {
-		return errors.New("body too large")
+		z.Err = errors.New("body too large")
+		return z
 	}
 
-	r := io.LimitReader(res.Body, size)
-	buf := make([]byte, size)
-	_, err = io.ReadFull(r, buf)
+	mtype, _, _ := mime.ParseMediaType(res.Header.Get("Content-Type"))
+	arch, err := archive.NewReader(mtype, io.LimitReader(res.Body, size), size)
 	if err != nil {
-		return err
+		z.Err = err
+		return z
 	}
 
-	zr, err := zip.NewReader(bytes.NewReader(buf), size)
-	if err != nil {
-		return err
+	dest := dir
+	if name != "" {
+		dest = filepath.Join(dest, name) + ".srt"
 	}
 
-	for _, inode := range zr.File {
-		clean := filepath.Base(filepath.Clean(inode.Name))
-		if filepath.Ext(clean) != ".srt" {
-			continue
-		}
+	z.Extracted, z.Err = arch.Extract(dest, func(f string) bool {
+		return filepath.Ext(f) == ".srt"
+	})
 
-		dest := filepath.Join(dir, clean)
-		if name != "" {
-			dest = filepath.Join(dir, name+".srt")
-		}
-		if stat, _ := os.Stat(dest); stat != nil {
-			continue
-		}
+	_, _ = io.Copy(io.Discard, res.Body)
 
-		tmp := dest + ".tmp"
-		f, err := os.Create(tmp)
-		if err != nil {
-			return err
-		}
-
-		zf, err := zr.Open(inode.Name)
-		if err != nil {
-			_ = f.Close()
-			_ = os.Remove(tmp)
-			return err
-		}
-
-		if _, err = io.Copy(f, zf); err != nil {
-			_ = f.Close()
-			_ = os.Remove(tmp)
-			return err
-		}
-
-		_ = f.Close()
-		if err = os.Rename(tmp, dest); err != nil {
-			_ = os.Remove(tmp)
-			return err
-		}
-
-		if name != "" {
-			break
-		}
-	}
-
-	return nil
+	return z
 }
 
-func (api *API) Get(d Downloads, dir, name string, retries int) error {
+func (api *API) Get(d Downloads, dir, name string, retries int, cb func(ZipInfo)) error {
 	var gerr error
 	var wg sync.WaitGroup
 	for _, dl := range d {
@@ -286,8 +267,13 @@ func (api *API) Get(d Downloads, dir, name string, retries int) error {
 				return
 			}
 
-			if err = api.Download(uri, dir, name, retries); err != nil {
-				gerr = err
+			z := api.Download(uri, dir, name, retries)
+			if cb != nil {
+				cb(z)
+			}
+
+			if z.Err != nil {
+				gerr = z.Err
 				return
 			}
 		}(dl)

@@ -128,8 +128,10 @@ func main() {
 	var i bool
 	var q bool
 	var lang string
+	var hi bool
 	flag.StringVar(&lang, "l", string(subscene.LangEnglish), "subtitle language")
 	flag.BoolVar(&i, "i", false, "run interactively instead of picking the first result")
+	flag.BoolVar(&hi, "hi", false, "prefer subtitles for the hearing impaired")
 	flag.BoolVar(&q, "q", false, "sush")
 	flag.Usage = func() {
 		fmt.Println("Usage of subscene")
@@ -161,6 +163,11 @@ func main() {
 	}
 
 	path := filepath.Clean(flag.Arg(1))
+	_path, err := filepath.Abs(path)
+	if err == nil {
+		path = _path
+	}
+
 	dir := "./"
 	fq := filepath.Base(path)
 	ext := filepath.Ext(fq)
@@ -228,6 +235,47 @@ func main() {
 
 	if fq != "" {
 		fuzzy.Search(fq, strs, strs, downloads)
+		top := regexp.MustCompile(
+			`(?i)` +
+				`s[0-9]{2,}e[0-9]{2,}|` + // S02E04
+				`season [0-9]+|` +
+				`(?:19|20)[0-9]{2}`, // 1900-2099
+		)
+
+		ms := top.FindAllString(fq, -1)
+		headstr := make([]string, 0, len(strs))
+		headdl := make(subscene.Downloads, 0, len(downloads))
+		for _, m := range ms {
+			m = strings.ToLower(m)
+			for i := 0; i < len(strs); i++ {
+				if strings.Contains(strings.ToLower(strs[i]), m) {
+					headstr = append(headstr, strs[i])
+					headdl = append(headdl, downloads[i])
+					strs = append(strs[:i], strs[i+1:]...)
+					downloads = append(downloads[:i], downloads[i+1:]...)
+					i--
+				}
+			}
+		}
+
+		if len(headstr) != 0 {
+			strs = append(headstr, strs...)
+			downloads = append(headdl, downloads...)
+		}
+	}
+
+	for i, m := 0, 0; i < len(strs)-m; i++ {
+		if downloads[i].HI != hi {
+			curstr, curdl := strs[i], downloads[i]
+			for j := i; j < len(strs)-1; j++ {
+				strs[j] = strs[j+1]
+				downloads[j] = downloads[j+1]
+			}
+			strs[len(strs)-1] = curstr
+			downloads[len(downloads)-1] = curdl
+			m++
+			i--
+		}
 	}
 
 	if i {
@@ -249,7 +297,33 @@ func main() {
 		fmt.Println()
 	}
 
-	exit(api.Get(downloads, dir, fp, 20))
+	cb := func(i subscene.ZipInfo) {
+		if q {
+			return
+		}
+
+		if i.Err != nil {
+			fmt.Printf(
+				"\033[1;37;41m Fail \033[0m %s\n%s\n%s\n\n",
+				i.Err,
+				i.URI.String(),
+				i.Filename,
+			)
+			return
+		}
+
+		fmt.Printf("\033[1;30;42m Downloaded \033[0m %s\n", i.Filename)
+		for k, v := range i.Extracted {
+			if v == "" {
+				v = "skipped"
+			}
+			fmt.Printf("    - %s -> %s\n", k, v)
+		}
+		fmt.Println()
+	}
+
+	exit(api.Get(downloads, dir, fp, 20, cb))
+	exit(err)
 	if !q {
 		fmt.Println("Done")
 	}
