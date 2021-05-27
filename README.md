@@ -3,6 +3,8 @@
 ```
 Usage of subscene
 subscene [opts] <media query> <subtitle query>
+  -hi
+    	prefer subtitles for the hearing impaired
   -i	run interactively instead of picking the first result
   -l string
     	subtitle language (default "english")
@@ -21,5 +23,4 @@ subscene [opts] <media query> <subtitle query>
                          filename + '.srt'.
                          e.g.: subscene 'line of duty second' ~/owneddvdrips/line-of-duty-s02e03.avi
                                should result in ~/owneddvdrips/line-of-duty-s02e03.srt
-
 ```
